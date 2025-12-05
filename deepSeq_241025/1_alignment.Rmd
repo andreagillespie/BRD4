@@ -1,0 +1,350 @@
+---
+title: "deepSeq_241025"
+author: "Andrea"
+date: "2024-11-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(eval = FALSE)
+```
+
+fastq dir: /pipeline/Runs/NextSeq/241025_VH01624_189_222552VNX/ProjectFolders/Project_Oliver-Sinclair/*
+project dir: /dawson_genomics/Projects/BRD4/deepSeq_241025
+
+# deep sequencing of base edited BRD4 exons 6 & 7
+# align to guide library fasta from Ollie's pilot with 0 mismatches 
+```{bash}
+mkdir fastqc
+mkdir scripts
+mkdir logs
+mkdir trimmed_fastqs
+mkdir alignment
+mkdir session-info
+mkdir mapped_guides
+mkdir guide_counts
+
+# align to guide library
+for fq in /pipeline/Runs/NextSeq/241025_VH01624_189_222552VNX/ProjectFolders/Project_Oliver-Sinclair/*/*_R1_001.fastq.gz
+do 
+sname=`basename $fq _R1_001.fastq.gz` 
+dname=`dirname $fq` 
+sbatch scripts/MapCRISPR.sbatch $fq ${dname}/${sname}_R2_001.fastq.gz
+done
+
+module load multiqc/1.8
+multiqc .
+```
+
+# load libraries and set paths
+```{r}
+library(data.table)
+library(Rsubread)
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(RColorBrewer)
+
+project.dir <- "/dawson_genomics/Projects/BRD4/deepSeq_241025"
+bam.dir <- file.path(project.dir, "alignment")
+plots.dir <- file.path(project.dir, "plots")
+```
+
+# combine guide counts into a counts table
+```{r}
+bam.files <- list.files(bam.dir, pattern = "sort.bam$", full.names = TRUE)
+
+# make a saf from exons bed file
+ex67.bed <- fread("reference_files/BRD4_exon6_7.bed")
+ex67.saf <- data.frame(
+  "GeneID" = c("Exon7", "Exon6"),
+  "Chr" = ex67.bed$V1,
+  "Start" = ex67.bed$V2,
+  "End" = ex67.bed$V3,
+  "Strand" = "."
+)
+
+ex67.counts <- featureCounts(
+  bam.files,
+  annot.ext = ex67.saf,
+  isPairedEnd = TRUE,
+	requireBothEndsMapped = TRUE
+)
+colnames(ex67.counts$counts) <- gsub("-[0-9]?[0-9]_S[0-9]?[0-9].sort.bam", "", colnames(ex67.counts$counts))
+ex67.counts$counts
+```
+      ABE-9-14-1-E6 ABE-9-14-1-E7 ABE-9-14-2-E6 ABE-9-14-2-E7 ABE-T0-E6 ABE-T0-E7 BE4-9-14-1-E6 BE4-9-14-1-E7 BE4-9-14-2-E6
+Exon7          1655       9909817          1689      11688130      1423   8680096          1746      12377012          1755
+Exon6      12073846          1532       5278520          1195   6760517      1501       8450045          2138      13737229
+      BE4-9-14-2-E7 BE4-T0-E6 BE4-T0-E7
+Exon7       3923380      1361  14050875
+Exon6          1750   6975410      2030
+
+# make a VCF for exons w/expected edits as biallelic SNPs
+```{r}
+# start from gnomad chr 19 vcf
+gnomad <- fread("/data/reference/dawson_labs/gnomad/3/original/gnomad.genomes.v3.1.2.sites.chr19.vcf.bgz")
+
+ex67.seq <- "TGCTGAGGGTGGCTGCGCCCTCCCAAGCCTCACCTGGAGCTTGCGGGCCATGGCCACCACCTCATGGTCAGGAGGGTTGTACTTATAGCAGTTGGAGAACATCAATCGGACGTCAGCACCAAACTCCTGAGCATCACGGTACTCACGGGCCTCCAGTTTAGACTGGAAAACAAGACAAGTCCCTGTTAGCTGTGGTGGAGGGACAGCCTGCCCACCTTGTCCCTTCCCTCAGGCACATCCCGCTAACCTTGATTGTGCTCATGTCCATGGGGTGCTTGATGATGTCACAGTAGTCGTGTAGGCCCAGTGCCTCCACGTCCACAGGCTTGTAGAAGGGCCAGGCGTAGGCGGCGTGCTTCTTGGCAAACATCTCCTTGAGGATGCCGCTGCAGCACTTGAGCTGCTCCGAGACCTTGCTGCTCTTCTCTGGTGCTGGGTGCTGCT"
+ex67.seq <- unlist(str_extract_all(ex67.seq, boundary("character")))
+
+# need different vcfs for different editors
+# BE4 makes C>T edits
+ex67.be4.alt <- rep("N", length(ex67.seq))
+ex67.be4.alt[which(ex67.seq == "C")] <- "T"
+ex67.be4.vcf <- data.frame(
+  "#CHROM" = 19,
+  "POS" = c(seq(15263420, 15263548, 1), seq(15264404, 15264718, 1)),
+  "ID" = ".",
+  "REF" = ex67.seq,
+  "ALT" = ex67.be4.alt,
+  "QUAL" = ".",
+  "FILTER" = "NONE",
+  "INFO" = "AF=0.0", 
+  check.names = FALSE
+)
+# add vcf header
+ex67.be4.vcf <- rbind(
+  "##fileformat=VCFv4.2",
+  "##fileDate=20241122",
+  "##source=customVCFforBaseEditing",
+  "##INFO=<ID=AF,Number=A,Type=Float,Description=\"Allele Frequency\">",
+  ex67.be4.vcf
+ )
+
+write.table(
+  ex67.be4.vcf, 
+  file.path("reference_files/BRD4_exon6_7_BE4.vcf"),
+  sep = "\t",
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+
+# now for ABE, A>G edits
+ex67.abe.alt <- rep("N", length(ex67.seq))
+ex67.abe.alt[which(ex67.seq == "A")] <- "G"
+ex67.abe.vcf <- data.frame(
+  "#CHROM" = 19,
+  "POS" = c(seq(15263420, 15263548, 1), seq(15264404, 15264718, 1)),
+  "ID" = ".",
+  "REF" = ex67.seq,
+  "ALT" = ex67.abe.alt,
+  "QUAL" = ".",
+  "FILTER" = "NONE",
+  "INFO" = "AF=0.0", 
+  check.names = FALSE
+)
+# add vcf header
+ex67.abe.vcf <- rbind(
+  "##fileformat=VCFv4.2",
+  "##fileDate=20241122",
+  "##source=customVCFforBaseEditing",
+  "##INFO=<ID=AF,Number=A,Type=Float,Description=\"Allele Frequency\">",
+  ex67.abe.vcf
+ )
+
+write.table(
+  ex67.abe.vcf, 
+  file.path("reference_files/BRD4_exon6_7_ABE.vcf"),
+  sep = "\t",
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+```
+
+# use GATK pileup summaries function to get stats of edits
+```{bash}
+module load gatk/4.1.9.0
+dir="/dawson_genomics/Projects/BRD4/deepSeq_241025/"
+
+# make indices for vcfs
+gatk IndexFeatureFile -I reference_files/BRD4_exon6_7_BE4.vcf
+gatk IndexFeatureFile -I reference_files/BRD4_exon6_7_ABE.vcf
+
+gatk GetPileupSummaries \
+   -I ${dir}/alignment/ABE-9-14-1-E6-2_S5.sort.rg.bam \
+   -V ${dir}/reference_files/BRD4_exon6_7_ABE.vcf \
+   -L ${dir}/reference_files/BRD4_exon6_7_ABE.vcf \
+   --verbosity DEBUG \
+   --output ${dir}/results/ABE-9-14-1-E6-2_S5_pileupSummary.table
+```
+
+# tried everything I could think of to debug the above command, but nothing works
+# currently no error message, but still no output. No idea what else to do so 
+# leaving this here and just going to try to parse pileup output to collate stats
+```{r}
+# need to loop through editors separately as they make different changes
+abe.pu.files <- list.files(bam.dir, pattern = "ABE.*pileup.simp.txt.gz", full.names = TRUE)
+be4.pu.files <- list.files(bam.dir, pattern = "BE4.*pileup.simp.txt.gz", full.names = TRUE)
+
+# set allowable characters for nucleotides
+nucs <- c("c", "C", "a", "A", "t", "T", "g", "G")
+
+# ABE first, A>G edits
+abe.bar.data <- data.frame()
+for(pu.file in abe.pu.files){
+  samp.data <- data.frame()
+  pu.i <- fread(pu.file)
+  for(row.i in 1:nrow(pu.i)){
+    nuc.table <- table(str_extract_all(pu.i$V2[row.i], boundary("character")))
+    # keep only nucleotide counts
+    nuc.table <- nuc.table[which(names(nuc.table) %in% nucs)]
+    pos.data <- cbind(
+      gsub(".pileup.simp.txt", "", basename(pu.file)),
+      pu.i$V1[row.i], 
+      sum(nuc.table), 
+      sum(nuc.table[which(names(nuc.table) %in% c("a", "A"))])/sum(nuc.table),
+      sum(nuc.table[which(names(nuc.table) %in% c("g", "G"))])/sum(nuc.table)
+      )
+    samp.data <- rbind(samp.data, pos.data)
+  }
+  colnames(samp.data) <- c("sample", "position", "total", "propA", "propG")
+  samp.data$total <- as.numeric(samp.data$total)
+  samp.data$propA <- as.numeric(samp.data$propA)
+  samp.data$propG <- as.numeric(samp.data$propG)
+  samp.data$position <- as.factor(samp.data$position)
+  
+  # to be an edit must be majority A & > 1% G & have at least 100k reads
+  sample.data <- samp.data %>% filter(propA >= 0.5 & propG >= 0.01 & total > 100000)
+  abe.bar.data <- rbind(abe.bar.data, sample.data)
+}
+
+pdf(file.path(plots.dir, "barplot_propEdit_ABE.pdf"))
+ggplot(abe.bar.data, aes(y = propG, x = position, fill = sample)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  scale_fill_brewer(palette = "Dark2") +
+  theme_minimal()
+dev.off()
+
+# now BE4, C>T edits
+be4.bar.data <- data.frame()
+for(pu.file in be4.pu.files){
+  samp.data <- data.frame()
+  pu.i <- fread(pu.file)
+  for(row.i in 1:nrow(pu.i)){
+    nuc.table <- table(str_extract_all(pu.i$V2[row.i], boundary("character")))
+    # keep only nucleotide counts
+    nuc.table <- nuc.table[which(names(nuc.table) %in% nucs)]
+    pos.data <- cbind(
+      gsub(".pileup.simp.txt", "", basename(pu.file)),
+      pu.i$V1[row.i], 
+      sum(nuc.table), 
+      sum(nuc.table[which(names(nuc.table) %in% c("c", "C"))])/sum(nuc.table),
+      sum(nuc.table[which(names(nuc.table) %in% c("t", "T"))])/sum(nuc.table)
+      )
+    samp.data <- rbind(samp.data, pos.data)
+  }
+  colnames(samp.data) <- c("sample", "position", "total", "propC", "propT")
+  samp.data$total <- as.numeric(samp.data$total)
+  samp.data$propC <- as.numeric(samp.data$propC)
+  samp.data$propT <- as.numeric(samp.data$propT)
+  samp.data$position <- as.factor(samp.data$position)
+  
+  # to be an edit must be majority A & > 1% G & have at least 100k reads
+  sample.data <- samp.data %>% filter(propC >= 0.5 & propT >= 0.01 & total > 100000)
+  be4.bar.data <- rbind(be4.bar.data, sample.data)
+}
+
+pdf(file.path(plots.dir, "barplot_propEdit_BE4.pdf"))
+ggplot(be4.bar.data, aes(y = propT, x = position, fill = sample)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  scale_fill_brewer(palette = "Dark2") +
+  theme_minimal()
+dev.off()
+
+
+
+
+#for(pu.file in be4.pu.files){
+#  bar.data <- data.frame()
+#  pu.i <- fread(pu.file)
+#  for(row.i in 1:nrow(pu.i)){
+#    nuc.table <- table(str_extract_all(pu.i$V2[row.i], boundary("character")))
+#    # keep only nucleotide counts
+#    nuc.table <- nuc.table[which(names(nuc.table) %in% nucs)]
+#    pos.table <- cbind(
+#      pu.i$V1[row.i], 
+#      sum(nuc.table), 
+#      sum(nuc.table[which(names(nuc.table) %in% c("c", "C"))])/sum(nuc.table),
+#      sum(nuc.table[which(names(nuc.table) %in% c("t", "T"))])/sum(nuc.table)
+#      )
+#    bar.data <- rbind(bar.data, pos.table)
+#  }
+#  colnames(bar.data) <- c("position", "total", "propC", "propT")
+#  bar.data <- as.data.frame(bar.data)
+  
+  # to be an edit must be majority A & > 1% G & have at least 100k reads
+#  bar.data <- bar.data[which(bar.data$propC >= 0.5 & bar.data$propT >= 0.01 & bar.data$total > 100000), ]
+#  bar.data$position <- as.factor(bar.data$position)
+ 
+#  pdf(file.path(plots.dir, paste0("barplot_propEdit_", gsub(".pileup.simp.txt", ".pdf", basename(pu.file)))))
+#  ggplot(bar.data, aes(y = propT, x = position)) +
+#    geom_bar(stat = "identity") +
+#    theme_classic()
+#  dev.off()
+#}
+```
+
+# make a BRD4 sequence with each enriched edit for Ollie
+```{r}
+brd4.fa <- fread("reference_files/BRD4.fa")
+
+brd4.seq <- NULL
+for(row.i in 1:nrow(brd4.fa)){
+  brd4.nucs <- unlist(str_extract_all(brd4.fa[row.i], boundary("character")))
+  brd4.seq <- cbind(brd4.seq, t(brd4.nucs))
+}
+# set colnames as positions, reverse numeric order as it's on the neg strand
+names(brd4.seq) <- rev(15235519:15332539)
+
+# for each edit make the edit in the sequence and write out as a table for Ollie
+# do for each editor separately, ABE first
+unique(abe.bar.data$position)
+[1] 15264462 15264487 15264489 15264490 15263476
+
+for(pos in as.character(unique(abe.bar.data$position))){
+  brd4.alt <- brd4.seq
+  # the sequence is the reverse complement so the edits will be as well
+  brd4.alt[pos] <- "C"
+  write.table(
+    brd4.alt,
+    paste0("reference_files/BRD4_sequence_", pos, "_ABEedit.txt"),
+    sep = "\t",
+    col.names = FALSE,
+    row.names = TRUE,
+    quote = FALSE
+  )
+}
+
+unique(be4.bar.data$position)
+[1] 15263441 15263443 15263444 15263446 15263447 15263449
+
+# now for BE4
+for(pos in as.character(unique(be4.bar.data$position))){
+  brd4.alt <- brd4.seq
+  # the sequence is the reverse complement so the edits will be as well
+  brd4.alt[pos] <- "A"
+  write.table(
+    brd4.alt,
+    paste0("reference_files/BRD4_sequence_", pos, "_BE4edit.txt"),
+    sep = "\t",
+    col.names = FALSE,
+    row.names = TRUE,
+    quote = FALSE
+  )
+}
+```
+
+
+
+
+# save session info
+```{r}
+sesh.info <- capture.output(sessionInfo())
+writeLines(
+  sesh.info,
+  file.path(project.dir, "session-info", paste0(Sys.Date(), "_deepSeq_241025.txt"))
+)
+```
