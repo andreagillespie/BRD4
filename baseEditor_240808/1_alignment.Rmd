@@ -1,0 +1,159 @@
+---
+title: "baseEditor_240808"
+author: "Andrea"
+date: "2024-09-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(eval = FALSE)
+```
+
+fastq dir: /pipeline/Runs/NextSeq/240808_VH01624_147_AACLG7KHV/ProjectFolders/Project_Oliver-Sinclair/Sample_[AB]*
+project dir: /dawson_genomics/Projects/BRD4/baseEditor_240808
+
+# align base editor library to guide library fasta from Ollie's pilot
+# aligning with 0 mismatches to start 
+```{bash}
+mkdir fastqc
+mkdir scripts
+mkdir logs
+mkdir trimmed_fastqs
+mkdir alignment
+mkdir session-info
+mkdir mapped_guides
+mkdir guide_counts
+
+# align to guide library
+for fq in /pipeline/Runs/NextSeq/240808_VH01624_147_AACLG7KHV/ProjectFolders/Project_Oliver-Sinclair/Sample_[AB]*/*fastq.gz
+do
+sbatch scripts/MapCRISPR.sbatch $fq
+done
+
+module load multiqc/1.8
+multiqc .
+```
+
+# load libraries and set paths
+```{r}
+library(data.table)
+library(limma)
+
+project.dir <- "/dawson_genomics/Projects/BRD4/baseEditor_240808"
+counts.dir <- file.path(project.dir, "guide_counts")
+plots.dir <- file.path(project.dir, "plots")
+```
+
+# combine guide counts into a counts table
+```{r}
+gc.files <- list.files(counts.dir)
+all.counts <- fread(file.path(counts.dir, gc.files[1]), skip = 1)
+colnames(all.counts) <- c(gc.files[1], "sgRNA")
+for(gc in gc.files[-1]){
+  counts <- fread(file.path(counts.dir, gc), skip = 1)
+  colnames(counts) <- c(gc, "sgRNA")
+  all.counts <- merge(all.counts, counts, by = "sgRNA", all = TRUE)
+}
+colnames(all.counts) <- gsub(".guideCounts.txt", "", colnames(all.counts))
+
+# convert to mageck format
+sg.split <- strsplit2(all.counts$sgRNA, "_")
+all.counts$gene <- sg.split[, 1]
+all.counts <- all.counts[, c(1, 20, 2:19)]
+colnames(all.counts)[2] <- "gene"
+
+# clear up any issues or formatting that are problematic for mageck
+# change any NAs to 0 counts 
+all.counts[is.na(all.counts)] <- 0
+
+write.table(
+  all.counts,
+  file.path(counts.dir, "all_guideCounts.txt"),
+  sep = "\t",
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+
+# filter out very low counts, a couple of problematic guides should be removed
+# require at least 50 counts in at least half of the samples
+keep <- which(rowSums(all.counts >= 50) >= 8)
+filt.counts <- all.counts[keep, ]
+write.table(
+  filt.counts,
+  file.path(counts.dir, "filtered_guideCounts.txt"),
+  sep = "\t",
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+```
+> dim(all.counts)
+[1] 1313   20
+> dim(filt.counts)
+[1] 1311   20
+
+
+# run mageck test for desired comparisons
+```{bash}
+mkdir mageck_counts
+
+module purge
+module load mageck/0.5.9
+module load scipy/0.17.0
+module load R/4.2.0
+
+mageck test -k guide_counts/filtered_guideCounts.txt \
+  -t ABE-9-14-R1-I8_S52,ABE-9-14-R2-I9_S53 \
+  -c ABE-D-14-R1-I6_S50,ABE-D-14-R2-I7_S51 \
+  -n mageck_counts/ABE_D14_965A_vs_DMSO \
+  --remove-zero both --pdf-report --keep-tmp
+mageck test -k guide_counts/filtered_guideCounts.txt \
+  -t ABE-9-7-R1-I4_S48,ABE-9-7-R2-I5_S49 \
+  -c ABE-D-7-R1-I2_S46,ABE-D-7-R2-I3_S47 \
+  -n mageck_counts/ABE_D7_965A_vs_DMSO \
+  --remove-zero both --pdf-report --keep-tmp
+  
+mageck test -k guide_counts/filtered_guideCounts.txt \
+  -t ABE-D-14-R1-I6_S50,ABE-D-14-R2-I7_S51 \
+  -c ABE-T0-I1_S45 \
+  -n mageck_counts/ABE_DMSO_D14_vs_T0 \
+  --remove-zero both --pdf-report --keep-tmp
+mageck test -k guide_counts/filtered_guideCounts.txt \
+  -t ABE-D-7-R1-I2_S46,ABE-D-7-R2-I3_S47 \
+  -c ABE-T0-I1_S45 \
+  -n mageck_counts/ABE_DMSO_D7_vs_T0 \
+  --remove-zero both --pdf-report --keep-tmp
+
+mageck test -k guide_counts/filtered_guideCounts.txt \
+  -t BE4-9-14-R1-I17_S43,BE4-9-14-R2-I17_S44 \
+  -c BE4-D-14-R1-I15_S41,BE4-D-14-R2-I16_S42 \
+  -n mageck_counts/BE4_D14_965A_vs_DMSO \
+  --remove-zero both --pdf-report --keep-tmp
+mageck test -k guide_counts/filtered_guideCounts.txt \
+  -t BE4-9-7-R1-I13_S39,BE4-9-7-R2-I14_S40 \
+  -c BE4-D-7-R1-I11_S37,BE4-D-7-R2-I12_S38 \
+  -n mageck_counts/BE4_D7_965A_vs_DMSO \
+  --remove-zero both --pdf-report --keep-tmp
+
+mageck test -k guide_counts/filtered_guideCounts.txt \
+  -t BE4-D-14-R1-I15_S41,BE4-D-14-R2-I16_S42 \
+  -c BE4-T0-I10_S36 \
+  -n mageck_counts/BE4_DMSO_D14_vs_T0 \
+  --remove-zero both --pdf-report --keep-tmp
+mageck test -k guide_counts/filtered_guideCounts.txt \
+  -t BE4-D-7-R1-I11_S37,BE4-D-7-R2-I12_S38 \
+  -c BE4-T0-I10_S36 \
+  -n mageck_counts/BE4_DMSO_D7_vs_T0 \
+  --remove-zero both --pdf-report --keep-tmp
+```
+
+
+# save session info
+```{r}
+sesh.info <- capture.output(sessionInfo())
+writeLines(
+  sesh.info,
+  file.path(project.dir, "session-info", paste0(Sys.Date(), "_alignment_240808.txt"))
+)
+```
