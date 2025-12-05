@@ -1,0 +1,69 @@
+---
+title: "ChIPseq_240814"
+author: "Andrea"
+date: "2024/08/26"
+output: html_document
+---
+
+fastq location: /pipeline/Runs/NextSeq/240814_VH01624_150_AACLCNWHV/ProjectFolders/Project_Oliver-Sinclair/
+project directory: /dawson_genomics/Projects/BRD4/ChIP_240814/
+
+# set up project dir and process (fastqc, trim, align, tdfs)
+```{bash}
+mkdir alignment
+mkdir fastqc
+mkdir fastq_screen
+mkdir trimmed_fastqs
+mkdir logs
+mkdir scripts
+mkdir tdfs
+
+for fq in /pipeline/Runs/NextSeq/240814_VH01624_150_AACLCNWHV/ProjectFolders/Project_Oliver-Sinclair/Sample*/*_R1_001.fastq.gz
+do
+sbatch scripts/alignHg38.sbatch $fq
+done
+
+# run multiqc to collate reports
+module load multiqc/1.8
+multiqc .
+```
+
+# peak calling (both narrow and broad) include bedgraph output for Spark plots and diff peaks if needed
+```{bash}
+mkdir macs/narrowpeaks
+mkdir macs/broadpeaks
+
+for bam in alignment/*Prep-1-R*sort.rmdup.bam
+do
+sbatch scripts/macs2.sbatch $bam alignment/11-ChIP-965a-R3-Prep-1-input_S84.sort.rmdup.bam
+done
+
+for bam in alignment/*Prep-2-R*sort.rmdup.bam
+do
+sbatch scripts/macs2.sbatch $bam alignment/10-ChIP-DMSO-R1-Prep-2-input_S83.sort.rmdup.bam
+done
+```
+
+# combine reps by normalised bedgraphs
+```{bash}
+module load macs/2.2.7.1
+cd macs/broadpeaks
+
+macs2 cmbreps -i 1-ChIP-DMSO-Prep-2-R1_S85_treat_pileup.bdg 2-ChIP-DMSO-Prep-2-R2_S86_treat_pileup.bdg 8-ChIP-DMSO-Prep-1-R3_S92_treat_pileup.bdg -m mean -o DMSO_treat_pileup.bdg
+macs2 cmbreps -i 3-ChIP-965a-Prep-2-R1_S87_treat_pileup.bdg 4-ChIP-965a-Prep-2-R2_S88_treat_pileup.bdg 9-ChIP-965a-Prep-1-R3_S93_treat_pileup.bdg -m mean -o 965a_treat_pileup.bdg
+macs2 cmbreps -i 5-ChIP-dBET-Prep-2-R1_S89_treat_pileup.bdg 6-ChIP-dBET-Prep-2-R2_S90_treat_pileup.bdg 7-ChIP-dBET-Prep-2-R3_S91_treat_pileup.bdg -m mean -o dBET_treat_pileup.bdg
+```
+
+# get merged bams and bigwigs for DT plots
+```{bash}
+mkdir results
+mkdir bed_files
+mkdir plots
+
+sbatch scripts/mergeBamCov.sbatch 1-ChIP-DMSO-Prep-2-R1_S85.sort.rmdup.bam 2-ChIP-DMSO-Prep-2-R2_S86.sort.rmdup.bam 8-ChIP-DMSO-Prep-1-R3_S92.sort.rmdup.bam DMSO
+sbatch scripts/mergeBamCov.sbatch 3-ChIP-965a-Prep-2-R1_S87.sort.rmdup.bam 4-ChIP-965a-Prep-2-R2_S88.sort.rmdup.bam 9-ChIP-965a-Prep-1-R3_S93.sort.rmdup.bam 965a
+sbatch scripts/mergeBamCov.sbatch 5-ChIP-dBET-Prep-2-R1_S89.sort.rmdup.bam 6-ChIP-dBET-Prep-2-R2_S90.sort.rmdup.bam 7-ChIP-dBET-Prep-2-R3_S91.sort.rmdup.bam dBET
+
+sbatch scripts/DTMat_peakCentred_RPGCnorm_merged.sbatch
+```
+
