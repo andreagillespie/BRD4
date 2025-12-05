@@ -1,0 +1,157 @@
+---
+title: "4_mageck_analysis"
+author: "Andrea"
+date: "2024-09-13"
+output: html_document
+---
+
+fastq dir: /pipeline/Runs/NextSeq/240808_VH01624_147_AACLG7KHV/ProjectFolders/Project_Oliver-Sinclair/Sample_[AB]*
+project dir: /dawson_genomics/Projects/BRD4/baseEditor_240808
+
+# load libraries and set paths
+```{r}
+library(data.table)
+
+project.dir <- "/dawson_genomics/Projects/BRD4/baseEditor_240808"
+mageck.dir <- file.path(project.dir, "mageck_counts")
+mag.ann.dir <- file.path(project.dir, "mageck_results_ann")
+plots.dir <- file.path(project.dir, "plots")
+```
+
+# setup sgRNA info table
+```{r}
+guides <- read_csv("/dawson_genomics/Projects/CCS1477/baseEditor_240529/reference_files/Guides_BRD4_VHL.csv")
+g.info <- str_split(guides$`Guide ID`, pattern = "_", simplify = TRUE)
+guide.ann <- data.frame(
+  "Gene" = g.info[, 1],
+  "ID" = guides$`Guide ID`,
+  "Sequence" = guides$`Guide sequence`,
+  "Rank" = g.info[, 4]
+)
+rownames(guide.ann) <- guide.ann$ID
+```
+
+# make a table of most enriched guides w/coordinates for deep sequencing
+```{r}
+# get guides table for annotating sequence
+guides <- read_csv("/dawson_genomics/Projects/CCS1477/baseEditor_240529/reference_files/Guides_BRD4_VHL.csv")
+
+# get desired annotation columns from full crispick table
+cp.ann <- cp.all %>% dplyr::select(chr,
+                             Target.Gene.Symbol,
+                             Target.Gene.ID,
+                             Target.Transcript,
+                             Reference.Sequence,
+                             Strand.of.sgRNA,
+                             Orientation,
+                             sgRNA.Cut.Position..1.based.,
+                             sgRNA.Sequence,
+                             sgRNA.Context.Sequence,
+                             PAM.Sequence,
+                             Exon.Number,
+                             Target.Cut.Length,
+                             Target.Total.Length,
+                             Target.Cut..
+                             )
+# merge w/guide ann
+guide.ann <- merge(guides, cp.ann, by.x  = "Guide sequence", by.y =  "sgRNA.Sequence")
+# add column for aa position
+guide.ann$aa.pos <- round(guide.ann$Target.Cut.Length/3, digits = 0)
+
+# annotate each set of mageck results
+mag.files <- list.files(mageck.dir, pattern = "sgrna_summary.txt", full.names = TRUE)
+# initiate variables to save tables
+mag.list <- list()
+top.list <- list()
+for(i in 1:8){
+  # get mageck results and merge w/ann
+  mag.list[[i]] <- fread(mag.files[[i]])
+  mag.list[[i]] <- merge(mag.list[[i]], guide.ann, by.x = "sgrna", by.y = "Guide ID")
+  # calculate z-score of LFC
+  mag.list[[i]]$Z_score <- (mag.list[[i]]$LFC - mean(mag.list[[i]]$LFC))/sd(mag.list[[i]]$LFC)
+  # save full ann table
+  write.table(
+    mag.list[[i]],
+    file.path(mag.ann.dir, gsub(".sgrna_summary.txt", "_all_mageck_ann.txt", basename(mag.files[[i]]))),
+    sep = "\t",
+    col.names = TRUE,
+    row.names = FALSE,
+    quote = FALSE
+  )
+  # get only those in BRD4 >2 sds up
+  top.list[[i]] <- subset(mag.list[[i]], Gene == "BRD4" & Z_score > 2)
+  # write out top table
+  write.table(
+    top.list[[i]],
+    file.path(mag.ann.dir, gsub(".sgrna_summary.txt", "_BRD4_Zscore2_mageck_ann.txt", basename(mag.files[[i]]))),
+    sep = "\t",
+    col.names = TRUE,
+    row.names = FALSE,
+    quote = FALSE
+  )
+}
+names(mag.list) <- gsub(".sgrna_summary.txt", "", basename(mag.files))
+```
+
+# make z-score protein plots for mageck stats
+```{r}
+# protein plot already defined in environment in 3_diff_analysis.Rmd
+for(con.i in 1:8){
+  # screen plot
+  screen.plot <- mag.list[[con.i]] %>% dplyr::filter(FDR < 0.5 & Gene == "BRD4") %>% 
+      ggplot(aes(x = aa.pos, y = Z_score, color = FDR)) + 
+      geom_point() + 
+      geom_hline(yintercept = 4, color = "red3") + theme_linedraw() +
+      scale_color_continuous(low = "darkblue", high = "grey90") +
+      ggtitle(names(mag.list)[con.i]) +
+      theme_light() + 
+      theme(legend.position = "right") + 
+      coord_cartesian(xlim = c(0, 1351))
+  screen.plot <- screen.plot + theme(axis.title.x = element_blank())
+  
+  plt <- list(screen.plot = screen.plot, prot.plot = prot.plot)
+  ggpubr::ggarrange(plt$screen.plot, plt$prot.plot, heights = c(12, 4),
+            ncol = 1, nrow = 2, align = "v", legend = "bottom", common.legend = TRUE)
+  
+  ggsave(
+    file.path(
+      plots.dir, 
+      paste0("BRD4_prot_Zscore_", names(mag.list)[con.i], "_mageck.pdf")
+      ), 
+    width = 8, 
+    height = 5
+    )
+}
+```
+
+# write out tables of lowest z-scores in ABE DMSOvT0
+```{r}
+abe.d14.t0 <- mag.list$ABE_DMSO_D14_vs_T0 %>% filter(Z_score < -3.75)
+write.table(
+  abe.d14.t0,
+  file.path(mag.ann.dir, "ABE_DMSO_D14vT0_zscoreLow_mageck_ann.txt"),
+  sep = "\t",
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+
+abe.d7.t0 <- mag.list$ABE_DMSO_D7_vs_T0 %>% filter(Z_score < -3.75)
+write.table(
+  abe.d7.t0,
+  file.path(mag.ann.dir, "ABE_DMSO_D7vT0_zscoreLow_mageck_ann.txt"),
+  sep = "\t",
+  col.names = TRUE,
+  row.names = FALSE,
+  quote = FALSE
+)
+```
+
+# save session info
+```{r}
+sesh.info <- capture.output(sessionInfo())
+writeLines(
+  sesh.info,
+  file.path(project.dir, "session-info", paste0(Sys.Date(), "_mageck_analysis.txt"))
+)
+```

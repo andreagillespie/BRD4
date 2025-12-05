@@ -1,0 +1,389 @@
+---
+title: "baseEditor_240808"
+author: "Andrea"
+date: "24/09/04"
+output: html_document
+---
+
+
+# adapted from Dane's BE_Screen_lib_anno.Rmd script
+#Library designed using CRISPick
+
+#------------------------------------
+# SETUP
+#------------------------------------
+
+
+## library imports
+```{r, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(edgeR)
+library(bartools)
+library(clusterProfiler)
+library(GenomicRanges)
+library('org.Hs.eg.db')
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+library(GenomicFeatures)
+library(ensembldb)
+library("EnsDb.Hsapiens.v86")
+library(Gviz)
+```
+
+## setup sgRNA info table
+```{r}
+guides <- read_csv("/dawson_genomics/Projects/CCS1477/baseEditor_240529/reference_files/Guides_BRD4_VHL.csv")
+g.info <- str_split(guides$`Guide ID`, pattern = "_", simplify = TRUE)
+guide.ann <- data.frame(
+  "Gene" = g.info[, 1],
+  "ID" = guides$`Guide ID`,
+  "Sequence" = guides$`Guide sequence`,
+  "Rank" = g.info[, 4]
+)
+rownames(guide.ann) <- guide.ann$ID
+```
+
+## incorporate info from design tool (CRISPick)
+```{r}
+crispick_brd4 <- read_excel("reference_files/CRISPick Results.xlsx")
+crispick_vhl <- read_excel("reference_files/CRISPick Results.xlsx", sheet = "VHL")
+# remove picking notes column not in brd4 file
+crispick_vhl <- crispick_vhl[, -53]
+cp.all <- rbind(crispick_brd4, crispick_vhl)
+# reformat colnames
+colnames(cp.all) <- make.names(colnames(cp.all))
+
+table(guide.ann$Sequence %in% cp.all$sgRNA.Sequence)
+table(guide.ann$Gene %in% c("BRD4", "VHL"))
+# all brd4 and vhl sequences in table
+```
+
+#------------------------------------
+# BE4 and ABE annotation
+#------------------------------------
+
+## annotate editing window of each guide and predicted mutations of each guide
+```{r}
+# extract relevant fields from crispick sgRNA design dataset
+cp.all$chr <- ifelse(cp.all$Input == "BRD4", 19, 3)
+
+des <- cp.all %>% dplyr::select(chr,
+                             Target.Gene.Symbol,
+                             Target.Gene.ID,
+                             Target.Transcript,
+                             Reference.Sequence,
+                             Strand.of.sgRNA,
+                             Orientation,
+                             sgRNA.Cut.Position..1.based.,
+                             sgRNA.Sequence,
+                             sgRNA.Context.Sequence,
+                             PAM.Sequence,
+                             Exon.Number,
+                             Target.Cut.Length,
+                             Target.Total.Length,
+                             Target.Cut..
+                             )
+# all sgRNAs are 20bp
+table(unlist(lapply(des$sgRNA.Sequence, nchar)))
+
+# sgRNA.Cut.Position occurs 3bp upstream of the PAM, add start and end coords based on this, 
+des <- des %>% mutate(sgRNA.Start = ifelse(
+  Orientation == "antisense", 
+  des$sgRNA.Cut.Position..1.based. - 3, 
+  des$sgRNA.Cut.Position..1.based. - 17
+  ))
+des$sgRNA.End <- des$sgRNA.Start + 19
+
+# now also define sgRNA base editing window (+4 to +8 bp)
+des$edit.window.BE4 <- substr(des$sgRNA.Sequence, 4, 8)
+des$edit.window.ABE <- substr(des$sgRNA.Sequence, 4, 7)
+
+# for BE4max find C bases within edit window (C -> T conversions)
+des$edit.window.C <- "NO"
+des$edit.window.C[which(grepl("C", des$edit.window.BE4))] <- "YES"
+
+# for ABEmax find A bases within edit window (A -> G conversions)
+des$edit.window.A <- "NO"
+des$edit.window.A[which(grepl("A", des$edit.window.ABE))] <- "YES"
+
+# setup start and end of edit window for BE4
+des$edit.window.BE4.start <- ifelse(
+  des$Orientation == "antisense", 
+  des$sgRNA.End - 7, 
+  des$sgRNA.Start + 4
+  )
+des$edit.window.BE4.end <- ifelse(
+  des$Orientation == "antisense", 
+  des$sgRNA.End - 3, 
+  des$sgRNA.Start + 9
+  )
+
+# setup start and end of edit window for ABE
+des$edit.window.ABE.start <- ifelse(
+  des$Orientation == "antisense", 
+  des$sgRNA.End - 7, 
+  des$sgRNA.Start + 4
+  )
+des$edit.window.ABE.end <- ifelse(
+  des$Orientation == "antisense", 
+  des$sgRNA.End - 4, 
+  des$sgRNA.Start + 9
+  )
+
+```
+
+## setup vep input for BE4 (C --> T)
+```{r}
+# code from
+# https://github.com/MatthewACoelho/Base_Editing_Screens/blob/main/ABE8e_080522.Rmd
+
+# determine window for base editor BE4 (here is 4-8). sgRNAs are reported as 5 -> 3' regardless of orientation
+des.vcf <- mutate(des, window = substr(sgRNA.Sequence, 4, 8))
+
+# convert all T bases to C (here T to C for BE4, assume all mutations produced)
+des.vcf <-  mutate(des.vcf, edit = str_replace_all(window, "C", "t"))
+
+# make mutant seq (optional making full mutant protospacer genotype)
+des.vcf <-  mutate(des.vcf, mutant = paste0(substr(sgRNA.Sequence, 1, 3), edit, substr(sgRNA.Sequence, 9, 20)))
+
+# setup "VCF" file detailing mutations
+vep.dat <- des.vcf %>% dplyr::select(chr, edit.window.BE4.start, Target.Gene.Symbol, window, edit)
+colnames(vep.dat) <- c("CHROM", "POS", "ID", "REF", "ALT")
+vep.dat$ID <- paste0(vep.dat$ID, "_", seq(1, nrow(vep.dat)))
+vep.dat$QUAL <- "."
+vep.dat$FILTER <- "PASS"
+vep.dat$INFO <- "."
+vep.dat$FORMAT <- "."
+write_delim(vep.dat, "reference_files/vep_dat_BE4.tsv", delim = "\t")
+
+des.vcf$allele <- paste0(des.vcf$window, '/', des.vcf$edit)
+vep.dat.ens <- des.vcf %>% dplyr::select(
+  chr, 
+  edit.window.BE4.start, 
+  edit.window.BE4.end, 
+  allele, 
+  Strand.of.sgRNA, 
+  sgRNA.Sequence
+  )
+
+# add ENSEMBL offset. GRCh38.p14 assembly, VEP v111
+# For + strand start -1 end -2 = 5bp editing window
+# For - strand leave alone
+vep.dat.ens$edit.window.BE4.start <- ifelse(
+  vep.dat.ens$Strand.of.sgRNA == "+", 
+  vep.dat.ens$edit.window.BE4.start - 1, 
+  vep.dat.ens$edit.window.BE4.start
+  )
+vep.dat.ens$edit.window.BE4.end <- ifelse(
+  vep.dat.ens$Strand.of.sgRNA == "+", 
+  vep.dat.ens$edit.window.BE4.end - 2, 
+  vep.dat.ens$edit.window.BE4.end
+  )
+
+vep.dat.ens <- vep.dat.ens %>% arrange(edit.window.BE4.start)
+write_delim(
+  vep.dat.ens, 
+  "reference_files/vep_dat_BE4_ENSEMBL.tsv", 
+  delim = "\t", 
+  col_names = FALSE
+  )
+```
+
+## setup vep input for ABE (A --> G)
+```{r}
+# code from
+# https://github.com/MatthewACoelho/Base_Editing_Screens/blob/main/ABE8e_080522.Rmd
+
+# determine window for base editor ABE (here is 4-7). sgRNAs are reported as 5 -> 3' regardless of orientation
+des.vcf <- mutate(des, window = substr(sgRNA.Sequence, 4, 7))
+
+# convert all A bases to G (here A to G for ABE, assume all mutations produced)
+des.vcf <-  mutate(des.vcf, edit = str_replace_all(window, "A", "g"))
+
+# make mutant seq (optional making full mutant protospacer genotype)
+des.vcf <-  mutate(des.vcf, mutant = paste0(substr(sgRNA.Sequence, 1, 3), edit, substr(sgRNA.Sequence, 8, 20)))
+
+# setup "VCF" file detailing mutations
+vep.dat <- des.vcf %>% dplyr::select(chr, edit.window.ABE.start, Target.Gene.Symbol, window, edit)
+colnames(vep.dat) <- c("CHROM", "POS", "ID", "REF", "ALT")
+vep.dat$ID <- paste0(vep.dat$ID, "_", seq(1, nrow(vep.dat)))
+vep.dat$QUAL <- "."
+vep.dat$FILTER <- "PASS"
+vep.dat$INFO <- "."
+vep.dat$FORMAT <- "."
+write_delim(vep.dat, "reference_files/vep_dat_ABE.tsv", delim = "\t")
+
+des.vcf$allele <- paste0(des.vcf$window, '/', des.vcf$edit)
+vep.dat.ens <- des.vcf %>% dplyr::select(
+  chr, 
+  edit.window.ABE.start, 
+  edit.window.ABE.end, 
+  allele, 
+  Strand.of.sgRNA, 
+  sgRNA.Sequence
+  )
+
+# add ENSEMBL offset. GRCh38.p14 assembly, VEP v111
+# For + strand start -1 end -3 = 4bp editing window
+# For - strand +1 ot start and end
+vep.dat.ens$edit.window.ABE.start <- ifelse(
+  vep.dat.ens$Strand.of.sgRNA == "-", 
+  vep.dat.ens$edit.window.ABE.start + 1,
+  vep.dat.ens$edit.window.ABE.start - 1
+  )
+vep.dat.ens$edit.window.ABE.end <- ifelse(
+  vep.dat.ens$Strand.of.sgRNA == "-", 
+  vep.dat.ens$edit.window.ABE.end + 1, 
+  vep.dat.ens$edit.window.ABE.end - 3
+  )
+
+vep.dat.ens <- vep.dat.ens %>% arrange(edit.window.ABE.start)
+write_delim(
+  vep.dat.ens, 
+  "reference_files/vep_dat_ABE_ENSEMBL.tsv", 
+  delim = "\t", 
+  col_names = FALSE
+  )
+```
+
+## run in vep using the following
+```{bash}
+# modified Richard Lupat's script (/home/Shared/from_rlupat/vep/1_annotate_vcf.sbatch)
+# to use with hg38
+sbatch scripts/vep_annotate_vcf.sbatch /dawson_genomics/Projects/BRD4/baseEditor_240808/reference_files/vep_dat_BE4_ENSEMBL.tsv /dawson_genomics/Projects/BRD4/baseEditor_240808/vep
+
+sbatch scripts/vep_annotate_vcf.sbatch /dawson_genomics/Projects/BRD4/baseEditor_240808/reference_files/vep_dat_ABE_ENSEMBL.tsv /dawson_genomics/Projects/BRD4/baseEditor_240808/vep
+```
+
+## import annotation results
+```{r}
+BE4.vep.ann <- read_delim("vep/vep_dat_ABE_ENSEMBL.tsv", skip = 168, delim = "\t")
+ABE.vep.ann <- read_delim("vep/vep_dat_BE4_ENSEMBL.tsv", skip = 168, delim = "\t")
+
+# subset for BRD4 and VHL 
+BE4.vep.ann <- BE4.vep.ann %>% dplyr::filter(Gene %in% c("ENSG00000141867", "ENSG00000134086"))
+ABE.vep.ann <- ABE.vep.ann %>% dplyr::filter(Gene %in% c("ENSG00000141867", "ENSG00000134086"))
+# also for MANE transcript
+BE4.vep.ann <- BE4.vep.ann %>% dplyr::filter(Feature %in% c("ENST00000679869", "ENST00000256474"))
+ABE.vep.ann <- ABE.vep.ann %>% dplyr::filter(Feature %in% c("ENST00000679869", "ENST00000256474"))
+
+colnames(BE4.vep.ann)[1] <- "Sequence"
+colnames(ABE.vep.ann)[1] <- "Sequence"
+```
+
+## merge annotations into sgRNA data
+```{r}
+# BE4
+be4.ann <- left_join(guide.ann, BE4.vep.ann, by = "Sequence")
+# fix NA consequence for guides with no C->T edits and for control sgRNAs
+be4.ann <- be4.ann %>% mutate(Consequence = ifelse(Gene.x == "BRD4" & is.na(Consequence), "None", "Control"))
+
+# write out annotated library file
+write.table(be4.ann, "vep/BE4.ann.tsv", quote = FALSE)
+
+# ABE
+abe.ann <- left_join(guide.ann, ABE.vep.ann, by = "Sequence")
+# fix NA consequence for guides with no C->T edits and for control sgRNAs
+abe.ann <- abe.ann %>% mutate(Consequence = ifelse(Gene.x == "BRD4" & is.na(Consequence), "None", "Control"))
+
+# write out annotated library file
+write.table(abe.ann, "vep/ABE.ann.tsv", quote = F)
+```
+
+
+#------------------------------------
+# OUTTAKES
+#------------------------------------
+
+
+```{r}
+edbx <- filter(EnsDb.Hsapiens.v86, filter = ~ seq_name == c("19", "3"))
+  
+# setup editing window Granges obj
+BE4.gr <- makeGRangesFromDataFrame(
+  des, 
+  seqnames.field = "chr", 
+  start.field = "edit.window.BE4.start", 
+  end.field = "edit.window.BE4.end", 
+  strand.field = "Strand.of.sgRNA",
+  keep.extra.columns = TRUE,
+  ignore.strand = TRUE
+  )
+seqlevelsStyle(BE4.gr)
+# map genome to transcript
+gnm_tx <- genomeToTranscript(BE4.gr, edbx)
+# map genome to protein
+gnm_prt <- genomeToProtein(BE4.gr, edbx)
+
+# get protein seq info for BRD4
+prot_seq <- proteins(edbx, 
+                      filter = ProteinIdFilter(unique(gnm_prt@unlistData@NAMES)),
+                      return.type = "AAStringSet")
+dat <- as.data.frame(gnm_prt)
+dat %>% mutate(aa.seq = as.character(prot_seq[[1]][dat$start:dat$end]))
+
+# this subsets the protein seq based on aa positions
+prot.seq <- as.character(prot_seq[[1]])
+dat$aa.seq <- unlist(lapply(1:nrow(dat), function(x){
+  start <- (dat[as.numeric(x),3])
+  end <- (dat[as.numeric(x),4])
+  if(dat[as.numeric(x),3] != -1){
+    aa <- substr(prot.seq, start,end)
+  } else {
+    aa <- ""
+  }
+  return(aa)
+  }))
+```
+
+## get granges of BRD4 
+```{r}
+# entrez id of BRD4
+entrezIds <- mapIds(org.Hs.eg.db, "BRD4", 'ENTREZID', 'SYMBOL')
+
+# get EP300 coords in hg38
+txdb <- TxDb.Hsapiens.UCSC.hg38.knownGene
+gene_coords <- select(txdb, keys = entrezIds, keytype = "GENEID", columns = columns(txdb))
+gene_dat <- select(edbx, keys = "BRD4", keytype = "SYMBOL", columns = columns(edbx))
+
+
+# keep only canonical transcript
+gene_coords <- gene_coords %>% dplyr::filter(TXID == 222714)
+
+# make granges from P300 exon data
+gr <- makeGRangesFromDataFrame(gene_coords, 
+                               seqnames.field = "EXONCHROM", 
+                               start.field = "EXONSTART", 
+                               end.field = "EXONEND", 
+                               strand.field = "EXONSTRAND",
+                               keep.extra.columns = T)
+gr  
+        
+# Before we map the coordinates we visualize the genomic region and all genes and transcripts overlapping it.
+gnm <- GRanges("19:15235519-15332539")
+## Since we're using Ensembl chromosome names we have to set:
+options(ucscChromosomeNames = FALSE)
+
+## Define a genome axis track
+gat <- GenomeAxisTrack(range = gr)
+
+## Get all genes in that region
+gnm_gns <- getGeneRegionTrackForGviz(edbx, filter = GRangesFilter(gr))
+gtx <- GeneRegionTrack(gnm_gns, name = "tx", geneSymbol = TRUE,
+                       showId = TRUE)
+
+## Generate a higlight track
+ht <- HighlightTrack(trackList = list(gat, gtx), range = gr)
+## plot the region
+plotTracks(list(ht))
+
+```
+
+
+# save session info
+```{r}
+sesh.info <- capture.output(sessionInfo())
+writeLines(
+  sesh.info,
+  file.path(project.dir, "session-info", paste0(Sys.Date(), "_lib_anno_240808.txt"))
+)
+```
