@@ -1,6 +1,8 @@
 # BRD4
 Scripts for analysis conducted during BRD4 project. Experiments included in this repo are:
 
+baseEditor_240529: initial sequencing and QC of base editing library before full experiment.
+
 baseEditor_240808: 2 base editors used, ABE & BE4 at T0 or treated with either DMSO or 965a for 7 or 14 days, n=2.
 
 ChIP_240814: cells treated w/DMSO, 965a or dBET, n=3.
